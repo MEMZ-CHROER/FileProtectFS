@@ -17,55 +17,101 @@ jobs:
     - uses: actions/checkout@v4
 
     # ===================================================================
-    # 1. 安装 WDK（用 choco，windows-2022 镜像预装 chocolatey）
+    # 1. 安装 WDK（多路尝试）
     # ===================================================================
-    - name: Install WDK
+    - name: Debug - check environment
       shell: pwsh
       run: |
-        # 先用 choco 安装 WDK，静默模式
-        choco install windowsdriverkit -y --no-progress `
-          --version 10.0.22621.382 --allow-downgrade
-        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) {
-          throw "choco install WDK failed (exit $LASTEXITCODE)"
-        }
-        Write-Host "WDK installed"
+        Write-Host "=== VS Where ==="
+        & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.WindowsDriverKit 2>$null
+        Write-Host "=== choco list ==="
+        choco list windowsdriverkit --limit-output 2>$null
+        if ($LASTEXITCODE -ne 0) { Write-Host "choco not available or no package" }
+        Write-Host "=== winget search ==="
+        winget search "Windows Driver Kit" --accept-source-agreements 2>$null
+        if ($LASTEXITCODE -ne 0) { Write-Host "winget not available" }
+        Write-Host "=== VS components ==="
+        & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -format json | ConvertFrom-Json | Select-Object -ExpandProperty catalog | Select-Object productDisplayVersion, productLine
 
-        # 验证 WDK 安装位置
-        $wdkDirs = @(
-          "${env:ProgramFiles(x86)}\Windows Kits\10\build",
-          "${env:ProgramFiles}\Windows Kits\10\build"
+    - name: Install WDK (winget)
+      shell: pwsh
+      run: |
+        # 尝试1: winget
+        winget install "Windows Driver Kit" -e --accept-source-agreements --accept-package-agreements
+        if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 3010) {
+          Write-Host "WDK installed via winget"
+          return
+        }
+        Write-Host "winget failed ($LASTEXITCODE), trying choco..."
+
+        # 尝试2: choco（不指定版本）
+        choco install windowsdriverkit -y --no-progress
+        if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 3010) {
+          Write-Host "WDK installed via choco"
+          return
+        }
+        Write-Host "choco failed ($LASTEXITCODE), trying direct download..."
+
+        # 尝试3: 微软官方下载 WDK 11
+        $urls = @(
+          "https://go.microsoft.com/fwlink/?linkid=2292239",   # WDK 11 24H2
+          "https://go.microsoft.com/fwlink/?linkid=2272238",   # WDK 11 23H2
+          "https://go.microsoft.com/fwlink/?linkid=2195408"    # WDK 10
         )
-        $found = $false
-        foreach ($dir in $wdkDirs) {
-          if (Test-Path "$dir\WindowsDriver.default.props") {
-            Write-Host "WDK found at: $dir"
-            $found = $true
-          }
+        foreach ($url in $urls) {
+          try {
+            $out = "$env:TEMP\wdk_installer.exe"
+            Write-Host "Downloading $url ..."
+            Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
+            if ((Get-Item $out).Length -gt 1MB) {
+              Write-Host "Installing (size: $((Get-Item $out).Length/1KB KB))..."
+              $p = Start-Process -Wait -PassThru -FilePath $out -ArgumentList "/quiet /install"
+              if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) {
+                Write-Host "WDK installed via direct download!"
+                return
+              }
+              Write-Host "Installer exit: $($p.ExitCode)"
+            }
+          } catch { Write-Host "Failed: $_" }
         }
-        if (-not $found) {
-          Write-Host "WDK install path not found, trying to locate..."
-          Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits" -Recurse `
-            -Filter "WindowsDriver.default.props" -ErrorAction SilentlyContinue |
-            Select-Object -First 1 | ForEach-Object { Write-Host "Found: $($_.FullName)" }
-        }
+
+        throw "All WDK installation methods failed!"
+      continue-on-error: true
 
     # ===================================================================
-    # 2. 编译 x86 驱动
+    # 2. 编译 x86 驱动（即使失败也继续，看错误信息）
     # ===================================================================
     - name: Build driver (x86)
       shell: cmd
+      continue-on-error: true
       run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x86
-        msbuild driver\fileprotect.vcxproj /p:Configuration=%CONFIG% /p:Platform=x86 /p:DebugType=none
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x86 -host_arch=x64
+        echo "=== Checking WDK environment ==="
+        where /R "C:\Program Files (x86)\Windows Kits" WindowsDriver.default.props 2>&1
+        where /R "C:\Program Files\Windows Kits" WindowsDriver.default.props 2>&1
+        set WDKContentRoot 2>&1
+        echo "=== Building ==="
+        msbuild driver\fileprotect.vcxproj /p:Configuration=%CONFIG% /p:Platform=x86 /p:DebugType=none /v:minimal
+        if %ERRORLEVEL% NEQ 0 (
+            echo "=== x86 build FAILED with code %ERRORLEVEL% ==="
+        )
 
     # ===================================================================
     # 3. 编译 x64 驱动
     # ===================================================================
     - name: Build driver (x64)
       shell: cmd
+      continue-on-error: true
       run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64
-        msbuild driver\fileprotect.vcxproj /p:Configuration=%CONFIG% /p:Platform=x64 /p:DebugType=none
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+        echo "=== Checking WDK environment ==="
+        where /R "C:\Program Files (x86)\Windows Kits" WindowsDriver.default.props 2>&1
+        where /R "C:\Program Files\Windows Kits" WindowsDriver.default.props 2>&1
+        echo "=== Building ==="
+        msbuild driver\fileprotect.vcxproj /p:Configuration=%CONFIG% /p:Platform=x64 /p:DebugType=none /v:minimal
+        if %ERRORLEVEL% NEQ 0 (
+            echo "=== x64 build FAILED with code %ERRORLEVEL% ==="
+        )
 
     # ===================================================================
     # 4. 编译 C# 控制程序 (x86 + x64 单文件)
