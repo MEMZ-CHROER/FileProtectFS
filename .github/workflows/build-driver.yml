@@ -11,112 +11,102 @@ env:
 
 jobs:
   build-and-release:
-    runs-on: windows-2022
+    runs-on: windows-latest
 
     steps:
     - uses: actions/checkout@v4
 
     # ===================================================================
-    # 1. 安装 WDK（多路尝试）
+    # 1. 查找 VS 路径（动态适配 win-2022/2025）
     # ===================================================================
-    - name: Debug - check environment
+    - name: Find VS + setup env
       shell: pwsh
       run: |
-        Write-Host "=== VS Where ==="
-        & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.WindowsDriverKit 2>$null
-        Write-Host "=== choco list ==="
-        choco list windowsdriverkit --limit-output 2>$null
-        if ($LASTEXITCODE -ne 0) { Write-Host "choco not available or no package" }
-        Write-Host "=== winget search ==="
-        winget search "Windows Driver Kit" --accept-source-agreements 2>$null
-        if ($LASTEXITCODE -ne 0) { Write-Host "winget not available" }
-        Write-Host "=== VS components ==="
-        & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -format json | ConvertFrom-Json | Select-Object -ExpandProperty catalog | Select-Object productDisplayVersion, productLine
+        $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+          -latest -products * -format json | ConvertFrom-Json
+        $vsPath = $vs.installationPath
+        $vsVer = $vs.catalog.productDisplayVersion
+        Write-Host "VS Path: $vsPath"
+        Write-Host "VS Version: $vsVer"
+        echo "VS_PATH=$vsPath" >> $env:GITHUB_ENV
+        echo "VS_VERSION=$vsVer" >> $env:GITHUB_ENV
 
+    # ===================================================================
+    # 2. 安装 WDK（winget，windows-latest 预装）
+    # ===================================================================
     - name: Install WDK (winget)
       shell: pwsh
       run: |
-        # 尝试1: winget
-        winget install "Windows Driver Kit" -e --accept-source-agreements --accept-package-agreements
-        if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 3010) {
-          Write-Host "WDK installed via winget"
+        # 先检查是否已装
+        $existing = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\build" `
+          -Filter "WindowsDriver.default.props" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($existing) {
+          Write-Host "WDK already installed at: $($existing.FullName)"
           return
         }
-        Write-Host "winget failed ($LASTEXITCODE), trying choco..."
 
-        # 尝试2: choco（不指定版本）
-        choco install windowsdriverkit -y --no-progress
-        if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 3010) {
-          Write-Host "WDK installed via choco"
-          return
-        }
-        Write-Host "choco failed ($LASTEXITCODE), trying direct download..."
-
-        # 尝试3: 微软官方下载 WDK 11
-        $urls = @(
-          "https://go.microsoft.com/fwlink/?linkid=2292239",   # WDK 11 24H2
-          "https://go.microsoft.com/fwlink/?linkid=2272238",   # WDK 11 23H2
-          "https://go.microsoft.com/fwlink/?linkid=2195408"    # WDK 10
+        # winget 安装
+        $packages = @(
+          "Microsoft.WindowsWDK.10.0.22621",
+          "Microsoft.WindowsWDK"
         )
-        foreach ($url in $urls) {
-          try {
-            $out = "$env:TEMP\wdk_installer.exe"
-            Write-Host "Downloading $url ..."
-            Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
-            if ((Get-Item $out).Length -gt 1MB) {
-              Write-Host "Installing (size: $((Get-Item $out).Length/1KB KB))..."
-              $p = Start-Process -Wait -PassThru -FilePath $out -ArgumentList "/quiet /install"
-              if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) {
-                Write-Host "WDK installed via direct download!"
-                return
-              }
-              Write-Host "Installer exit: $($p.ExitCode)"
-            }
-          } catch { Write-Host "Failed: $_" }
+        foreach ($pkg in $packages) {
+          Write-Host "Trying winget: $pkg"
+          winget install --id $pkg -e --accept-source-agreements --accept-package-agreements --silent
+          $ec = $LASTEXITCODE
+          if ($ec -eq 0 -or $ec -eq 3010) {
+            Write-Host "Installed: $pkg"
+            exit 0
+          }
+          Write-Host "Failed ($ec), trying next..."
         }
-
-        throw "All WDK installation methods failed!"
+        Write-Host "All winget attempts failed. Checking alternatives..."
+        choco install windowsdriverkit -y --no-progress 2>$null
+        if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 3010) {
+          Write-Host "Installed via choco"
+          exit 0
+        }
+        Write-Host "::warning::WDK could not be installed, driver will not build"
       continue-on-error: true
 
     # ===================================================================
-    # 2. 编译 x86 驱动（即使失败也继续，看错误信息）
+    # 3. 编译 x86 驱动
     # ===================================================================
     - name: Build driver (x86)
       shell: cmd
       continue-on-error: true
       run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x86 -host_arch=x64
-        echo "=== Checking WDK environment ==="
-        where /R "C:\Program Files (x86)\Windows Kits" WindowsDriver.default.props 2>&1
-        where /R "C:\Program Files\Windows Kits" WindowsDriver.default.props 2>&1
-        set WDKContentRoot 2>&1
-        echo "=== Building ==="
-        msbuild driver\fileprotect.vcxproj /p:Configuration=%CONFIG% /p:Platform=x86 /p:DebugType=none /v:minimal
-        if %ERRORLEVEL% NEQ 0 (
-            echo "=== x86 build FAILED with code %ERRORLEVEL% ==="
+        call "%VS_PATH%\Common7\Tools\VsDevCmd.bat" -arch=x86 -host_arch=x64
+        echo === WDK check ===
+        where /R "%ProgramFiles(x86)%\Windows Kits" WindowsDriver.default.props 2>&1
+        if exist "%ProgramFiles(x86)%\Windows Kits\10\build\WindowsDriver.default.props" (
+          set WDKContentRoot=%ProgramFiles(x86)%\Windows Kits\10\
         )
+        echo === Building x86 ===
+        msbuild driver\fileprotect.vcxproj /p:Configuration=%CONFIG% /p:Platform=x86 /p:DebugType=none /v:minimal
+        if errorlevel 1 echo x86 BUILD FAILED
 
     # ===================================================================
-    # 3. 编译 x64 驱动
+    # 4. 编译 x64 驱动
     # ===================================================================
     - name: Build driver (x64)
       shell: cmd
       continue-on-error: true
       run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
-        echo "=== Checking WDK environment ==="
-        where /R "C:\Program Files (x86)\Windows Kits" WindowsDriver.default.props 2>&1
-        where /R "C:\Program Files\Windows Kits" WindowsDriver.default.props 2>&1
-        echo "=== Building ==="
-        msbuild driver\fileprotect.vcxproj /p:Configuration=%CONFIG% /p:Platform=x64 /p:DebugType=none /v:minimal
-        if %ERRORLEVEL% NEQ 0 (
-            echo "=== x64 build FAILED with code %ERRORLEVEL% ==="
+        call "%VS_PATH%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+        echo === WDK check ===
+        where /R "%ProgramFiles(x86)%\Windows Kits" WindowsDriver.default.props 2>&1
+        if exist "%ProgramFiles(x86)%\Windows Kits\10\build\WindowsDriver.default.props" (
+          set WDKContentRoot=%ProgramFiles(x86)%\Windows Kits\10\
         )
+        echo === Building x64 ===
+        msbuild driver\fileprotect.vcxproj /p:Configuration=%CONFIG% /p:Platform=x64 /p:DebugType=none /v:minimal
+        if errorlevel 1 echo x64 BUILD FAILED
 
     # ===================================================================
-    # 4. 编译 C# 控制程序 (x86 + x64 单文件)
+    # 5. 编译 C# 控制程序
     # ===================================================================
-    - name: Build C# (x86 single-file)
+    - name: Build C# (x86)
       shell: pwsh
       run: |
         dotnet publish -c Release -r win-x86 `
@@ -128,7 +118,7 @@ jobs:
           --self-contained true `
           -o publish\x86
 
-    - name: Build C# (x64 single-file)
+    - name: Build C# (x64)
       shell: pwsh
       run: |
         dotnet publish -c Release -r win-x64 `
@@ -141,88 +131,74 @@ jobs:
           -o publish\x64
 
     # ===================================================================
-    # 5. 收集所有文件
+    # 6. 收集所有文件
     # ===================================================================
     - name: Collect release files
       shell: pwsh
       run: |
         New-Item -ItemType Directory -Force -Path release_files
 
-        # 驱动文件
+        # 驱动
         $sysFiles = Get-ChildItem -Recurse -Filter "FileProtectFS.sys" | Where-Object {
           $_.DirectoryName -notmatch "obj"
         }
-        $sysFiles | ForEach-Object {
-          $arch = if ($_.FullName -match "\\x86\\") {"x86"} else {"x64"}
-          $dest = "release_files/FileProtectFS-$arch.sys"
-          Copy-Item $_.FullName $dest -Force
-          Write-Host "Driver: $dest ($($_.Length/1KB -as [int]) KB)"
+        if ($sysFiles.Count -eq 0) {
+          Write-Host "::warning::No driver .sys found, skipping driver artifacts"
+        } else {
+          $sysFiles | ForEach-Object {
+            $arch = if ($_.FullName -match "\\x86\\") {"x86"} else {"x64"}
+            $dest = "release_files/FileProtectFS-$arch.sys"
+            Copy-Item $_.FullName $dest -Force
+            Write-Host "Driver: $dest ($($_.Length/1KB -as [int]) KB)"
+          }
         }
 
-        # 控制程序
+        # C#
         if (Test-Path publish\x86\FileProtect.exe) {
           Copy-Item publish\x86\FileProtect.exe release_files/FileProtect.exe
-          $size = (Get-Item publish\x86\FileProtect.exe).Length
-          Write-Host "C# x86: $( $size/1KB -as [int] ) KB"
+          $s = (Get-Item publish\x86\FileProtect.exe).Length
+          Write-Host "C# x86: $( $s/1KB -as [int] ) KB"
         }
         if (Test-Path publish\x64\FileProtect.exe) {
           Copy-Item publish\x64\FileProtect.exe release_files/FileProtect-x64.exe
-          $size = (Get-Item publish\x64\FileProtect.exe).Length
-          Write-Host "C# x64: $( $size/1KB -as [int] ) KB"
+          $s = (Get-Item publish\x64\FileProtect.exe).Length
+          Write-Host "C# x64: $( $s/1KB -as [int] ) KB"
         }
 
-        # INF 安装文件
-        Copy-Item driver\fileprotectfs.inf release_files/ -Force
+        # INF
+        if (Test-Path driver\fileprotectfs.inf) {
+          Copy-Item driver\fileprotectfs.inf release_files/
+        }
 
-        # 清单
         Write-Host "`n=== Release Files ==="
         Get-ChildItem release_files | ForEach-Object {
           Write-Host "$($_.Name)`t$($_.Length) bytes"
         }
 
     # ===================================================================
-    # 6. 发布到 Releases（草稿）
+    # 7. 发布到 Releases
     # ===================================================================
     - name: Publish to GitHub Releases
+      if: success()  # C# 编译成功就发布，即使驱动编译失败
       shell: pwsh
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
         $tag = "v1.0-build.$env:GITHUB_RUN_NUMBER"
-
-        # Release 说明
-        $sha = "$env:GITHUB_SHA".Substring(0,7)
         $files = Get-ChildItem release_files
         $fileList = $files | ForEach-Object { "- $($_.Name) ($($_.Length/1KB -as [int]) KB)" } | Out-String
 
         $notes = @"
         FileProtectFS — 内核级文件权限保护驱动
 
-        ## 文件清单
-        — 包含文件已自动编译于 $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm')) UTC
+        自动构建于 $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm')) UTC
 
+        ## 文件清单
         $fileList
         ## 使用说明
         [完整文档](https://github.com/$env:GITHUB_REPOSITORY)
-
-        ```bat
-        :: 1. 启用测试签名（64位系统）
-        bcdedit /set testsigning on
-        重启
-
-        :: 2. 安装驱动
-        FileProtect driver install
-        FileProtect driver start
-
-        :: 3. 保护文件
-        FileProtect protect --ring0 C:\目标文件
-
-        :: 4. 查看保护状态
-        FileProtect driver status
-        ```
         "@
 
-        # 创建 Release（草稿模式）
         gh release create $tag `
           --repo $env:GITHUB_REPOSITORY `
           --title "FileProtectFS Build #$env:GITHUB_RUN_NUMBER" `
@@ -230,5 +206,5 @@ jobs:
           --draft `
           ./release_files/*
 
-        Write-Host "✅ Release created: $tag"
+        Write-Host "✅ Release: $tag"
         Write-Host "   https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$tag"
