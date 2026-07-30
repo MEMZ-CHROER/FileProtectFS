@@ -178,51 +178,66 @@ jobs:
     # ===================================================================
     # 7. 发布到 Releases
     # ===================================================================
-    - name: Create GitHub Release (via API)
+    - name: Create GitHub Release (PowerShell API)
       shell: pwsh
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
         $tag = "v1.0-build.$env:GITHUB_RUN_NUMBER"
-        $repo = $env:GITHUB_REPOSITORY  # owner/repo
+        $repo = $env:GITHUB_REPOSITORY
+        $headers = @{ Authorization = "Bearer $env:GH_TOKEN" }
+        $api = "https://api.github.com/repos/$repo"
+
+        Write-Host "Creating release $tag ..."
 
         # 1. 创建 Release
-        $body = @{
-          tag_name               = $tag
-          name                   = "FileProtectFS Build #$env:GITHUB_RUN_NUMBER"
-          body                   = "FileProtectFS — 内核级文件权限保护驱动`n自动构建于 $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm')) UTC"
-          draft                  = $true
-          generate_release_notes = $false
-        } | ConvertTo-Json
-
-        $createResult = curl.exe -s -X POST `
-          -H "Authorization: Bearer $env:GH_TOKEN" `
-          -H "Content-Type: application/json" `
-          -d $body `
-          "https://api.github.com/repos/$repo/releases"
-
-        $releaseId = ($createResult | ConvertFrom-Json).id
-        if (-not $releaseId) {
-          Write-Host "Create release failed:"
-          Write-Host $createResult
-          exit 1
+        $releaseBody = @{
+          tag_name = $tag
+          name = "FileProtectFS Build #$env:GITHUB_RUN_NUMBER"
+          body = "FileProtectFS - kernel-level file ACL protection driver`nBuilt at $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm')) UTC"
+          draft = $true
         }
-        Write-Host "Release created: id=$releaseId"
+
+        try {
+          $release = Invoke-RestMethod -Uri "$api/releases" -Method Post `
+            -Headers $headers -Body ($releaseBody | ConvertTo-Json) `
+            -ContentType "application/json"
+        } catch {
+          $err = $_.Exception.Response
+          $reader = New-Object System.IO.StreamReader($err.GetResponseStream())
+          $respBody = $reader.ReadToEnd() | Out-String
+          Write-Host "FAILED to create release: $respBody"
+          # 可能 tag 已存在，尝试获取已有 release
+          Write-Host "Trying to find existing release..."
+          try {
+            $existing = Invoke-RestMethod -Uri "$api/releases/tags/$tag" -Headers $headers
+            $release = $existing
+            Write-Host "Found existing release id=$($release.id)"
+          } catch {
+            Write-Host "No existing release found, creating with unique tag..."
+            $tag = "v1.0-build.$env:GITHUB_RUN_NUMBER.$([DateTime]::UtcNow.ToString('HHmmss'))"
+            $releaseBody.tag_name = $tag
+            $release = Invoke-RestMethod -Uri "$api/releases" -Method Post `
+              -Headers $headers -Body ($releaseBody | ConvertTo-Json) `
+              -ContentType "application/json"
+          }
+        }
+
+        $releaseId = $release.id
+        Write-Host "Release id=$releaseId tag=$($release.tag_name)"
 
         # 2. 上传文件
         $files = Get-ChildItem -Path release_files -File
         foreach ($file in $files) {
-          Write-Host "Uploading: $($file.Name) ..."
-          $uploadResult = curl.exe -s -X POST `
-            -H "Authorization: Bearer $env:GH_TOKEN" `
-            -H "Content-Type: application/octet-stream" `
-            --data-binary "@$($file.FullName)" `
-            "https://uploads.github.com/repos/$repo/releases/$releaseId/assets?name=$($file.Name)"
-          $uploadStatus = $uploadResult | ConvertFrom-Json
-          if ($uploadStatus.state -eq "uploaded") {
+          Write-Host "Uploading $($file.Name) ..."
+          $uploadUri = "https://uploads.github.com/repos/$repo/releases/$releaseId/assets?name=$($file.Name)"
+          try {
+            $upload = Invoke-RestMethod -Uri $uploadUri -Method Post `
+              -Headers $headers -ContentType "application/octet-stream" `
+              -InFile $file.FullName
             Write-Host "  OK"
-          } else {
-            Write-Host "  FAILED: $uploadResult"
+          } catch {
+            Write-Host "  FAILED: $($_.Exception.Message)"
           }
         }
 
