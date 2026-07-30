@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="15.0"
+         xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <Import Project="$(WDKContentRoot)\build\WindowsDriver.default.props" />
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}</ProjectGuid>
+    <TemplateGuid>{a7a957b2-f8f4-4d51-a22f-175bf2c09ced}</TemplateGuid>
+    <TargetFrameworkVersion>v4.0</TargetFrameworkVersion>
+    <MinimumVisualStudioVersion>15.0</MinimumVisualStudioVersion>
+    <Configuration>Release</Configuration>
+    <Platform Condition="'$(Platform)' == ''">x86</Platform>
+    <RootNamespace>FileProtectFS</RootNamespace>
+    <DriverType>KMDF</DriverType>
+    <DriverTargetType>FileSystem</DriverTargetType>
+    <KmdfVersion>1.0</KmdfVersion>
+  </PropertyGroup>
+
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x86">
+      <Configuration>Release</Configuration>
+      <Platform>x86</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Configuration">
+    <DriverType>KMDF</DriverType>
+    <KmdfVersion>1.0</KmdfVersion>
+  </PropertyGroup>
+
+  <Import Project="$(WDKContentRoot)\build\WindowsDriver.props" />
+
+  <ItemGroup>
+    <FilesToPackage Include="$(TargetPath)" Condition="Exists('$(TargetPath)')" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Inf Include="fileprotectfs.inf" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClCompile Include="fileprotect.c" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClInclude Include="fileprotect.h" />
+  </ItemGroup>
+
+  <!-- 驱动特定链接库 -->
+  <ItemDefinitionGroup>
+    <Link>
+      <AdditionalDependencies>fltmgr.lib;ntoskrnl.lib;hal.lib</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <Import Project="$(WDKContentRoot)\build\WindowsDriver.targets" />
+</Project>

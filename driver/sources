@@ -1,0 +1,20 @@
+TARGETNAME=FileProtectFS
+TARGETTYPE=DRIVER
+TARGETPATH=obj
+DLLBASE=0x10000
+
+MSC_WARNING_LEVEL=/W4
+
+INCLUDES=..\..\inc
+
+SOURCES=fileprotect.c
+
+TARGETLIBS=$(SDK_LIB_PATH)\ntoskrnl.lib \
+           $(SDK_LIB_PATH)\hal.lib \
+           $(SDK_LIB_PATH)\fltmgr.lib
+
+MSC_OPTIMIZATION=/Ot
+
+USE_MSVCRT=1
+
+DRIVER_LEVEL=7

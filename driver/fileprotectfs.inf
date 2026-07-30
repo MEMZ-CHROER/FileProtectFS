@@ -1,0 +1,63 @@
+; FileProtectFS.inf — Ring0 文件权限保护驱动安装信息
+; 适用于 Windows 10/11 x86 and x64
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = ActivityMonitor
+ClassGuid   = {b86dff51-a31e-4bac-b3bb-e4083410e23f}
+Provider    = %ProviderName%
+DriverVer   = 07/30/2026,1.0.0.0
+CatalogFile = FileProtectFS.cat
+
+[DestinationDirs]
+DefaultDestDir = 12
+MiniFilter.DriverFiles = 12
+
+[DefaultInstall]
+OptionDesc = %ServiceDescription%
+CopyFiles  = MiniFilter.DriverFiles
+
+[DefaultInstall.Services]
+AddService = %ServiceName%, %SPSVCINST_ASSOC_SERVICE%, MiniFilter.Service
+
+[DefaultUninstall]
+DelFiles   = MiniFilter.DriverFiles
+
+[DefaultUninstall.Services]
+DelService = %ServiceName%, 0x200
+
+[MiniFilter.Service]
+DisplayName    = %ServiceDisplayName%
+Description    = %ServiceDescription%
+ServiceBinary  = %12%\%DriverName%.sys
+ServiceType    = %SERVICE_FILE_SYSTEM_DRIVER%
+StartType      = %SERVICE_DEMAND_START%
+ErrorControl   = %SERVICE_ERROR_NORMAL%
+LoadOrderGroup = "FSFilter Activity Monitor"
+AddReg         = MiniFilter.AddRegistry
+
+[MiniFilter.AddRegistry]
+HKR, "Instances\FileProtectFS Instance", "Altitude",  0x00000000, "360100"
+HKR, "Instances\FileProtectFS Instance", "Flags",    0x00010001, 0x0
+
+[MiniFilter.DriverFiles]
+%DriverName%.sys
+
+[SourceDisksFiles]
+%DriverName%.sys = 1,,
+
+[SourceDisksNames]
+1 = %DiskName%,,,
+
+[Strings]
+ProviderName            = "FileProtect"
+ServiceName             = "FileProtectFS"
+ServiceDisplayName      = "FileProtectFS — Ring0 File ACL Guard"
+ServiceDescription      = "Prevents modification of file ACLs at kernel level"
+DriverName              = "FileProtectFS"
+DiskName                = "FileProtectFS Installation Disk"
+
+SPSVCINST_ASSOC_SERVICE = 0x0002
+SERVICE_FILE_SYSTEM_DRIVER = 2
+SERVICE_DEMAND_START     = 3
+SERVICE_ERROR_NORMAL     = 1
