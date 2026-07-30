@@ -12,6 +12,9 @@ env:
 jobs:
   build-and-release:
     runs-on: windows-latest
+    permissions:
+      contents: write       # 需要写权限才能创建 Release
+      id-token: write
 
     steps:
     - uses: actions/checkout@v4
