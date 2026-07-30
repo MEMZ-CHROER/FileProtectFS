@@ -1,0 +1,27 @@
+# .NET
+bin/
+obj/
+publish/
+*.user
+*.suo
+*.cache
+*.userprefs
+
+# Driver build outputs
+*.obj
+*.pdb
+*.wrn
+*.log
+driver/obj*
+driver/*.sys
+
+# IDE
+.vs/
+*.sln.ide/
+*.VC.db
+*.VC.VC.opendb
+*.proj.user
+
+# OS
+Thumbs.db
+desktop.ini

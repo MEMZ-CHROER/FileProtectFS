@@ -1,0 +1,78 @@
+# FileProtectFS — GitHub Actions 自动编译内核驱动
+# push 后自动编译 x86/x64 并上传 artifact
+name: Build FileProtectFS Driver
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:        # 支持手动触发
+
+jobs:
+  build-driver:
+    runs-on: windows-2022   # 预装 VS 2022 + WDK
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: 安装 WDK
+      shell: pwsh
+      run: |
+        # Windows Server 2022 镜像包含 VS 2022，需安装 WDK
+        Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2272238" -OutFile "$env:TEMP\wdk.exe"
+        Start-Process -Wait -FilePath "$env:TEMP\wdk.exe" -ArgumentList "/quiet /install"
+        echo "WDK installed"
+      continue-on-error: true
+
+    - name: 还原 NuGet 包
+      run: |
+        msbuild driver\fileprotect.vcxproj /t:restore /p:configuration=Release /p:platform=x86
+
+    - name: 编译 x86 驱动
+      run: |
+        msbuild driver\fileprotect.vcxproj /p:configuration=Release /p:platform=x86 /p:DebugType=none
+      continue-on-error: false
+
+    - name: 编译 x64 驱动
+      run: |
+        msbuild driver\fileprotect.vcxproj /p:configuration=Release /p:platform=x64 /p:DebugType=none
+      continue-on-error: false
+
+    - name: 上传 x86 驱动 (artifact)
+      uses: actions/upload-artifact@v4
+      with:
+        name: FileProtectFS-x86
+        path: |
+          driver\**\Release\FileProtectFS.sys
+          driver\**\x86\Release\FileProtectFS.sys
+        if-no-files-found: warn
+
+    - name: 上传 x64 驱动 (artifact)
+      uses: actions/upload-artifact@v4
+      with:
+        name: FileProtectFS-x64
+        path: |
+          driver\**\Release\FileProtectFS.sys
+          driver\**\x64\Release\FileProtectFS.sys
+        if-no-files-found: warn
+
+    - name: 编译 C# 控制程序 (x86 单文件)
+      shell: pwsh
+      run: |
+        dotnet publish -c Release -r win-x86 `
+          -p:PlatformTarget=x86 `
+          -p:PublishSingleFile=true `
+          -p:SelfContained=true `
+          -p:IncludeNativeLibrariesForSelfExtract=true `
+          -p:DebugType=embedded `
+          --self-contained true `
+          -o publish\x86
+
+    - name: 上传完整工具包
+      uses: actions/upload-artifact@v4
+      with:
+        name: FileProtect-Full-x86
+        path: |
+          publish\x86\FileProtect.exe
+        if-no-files-found: warn
