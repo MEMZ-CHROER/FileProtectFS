@@ -1,91 +1,57 @@
-# FileProtectFS — GitHub Actions 自动编译内核驱动
-# push 后自动编译 x86/x64，产出 .sys 文件 + C# 控制程序
-name: Build FileProtectFS Driver
+# FileProtectFS — push 到 master 自动编译 → 发布到 Releases
+name: Build & Release
 
 on:
   push:
     branches: [ master, main ]
-  pull_request:
-    branches: [ master, main ]
-  workflow_dispatch:          # 支持在 GitHub 网页手动触发
+  workflow_dispatch:
 
 env:
-  CONFIGURATION: Release
+  CONFIG: Release
 
 jobs:
-  build:
-    runs-on: windows-2022     # 预装 VS 2022 + Windows SDK
+  build-and-release:
+    runs-on: windows-2022
 
     steps:
     - uses: actions/checkout@v4
 
-    # ----------------------------------------------------------------
-    # 安装 WDK（Windows Driver Kit）
-    # ----------------------------------------------------------------
-    - name: 安装 WDK 10.0.22621
+    # ===================================================================
+    # 1. 安装 WDK
+    # ===================================================================
+    - name: Install WDK
       shell: pwsh
       run: |
-        Write-Host "Downloading WDK installer ..."
-        $url = "https://go.microsoft.com/fwlink/?linkid=2195408"  # WDK 10.0.22621
-        $out = "$env:TEMP\wdk.exe"
-        Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
-        Write-Host "Installing WDK (silent) ..."
-        $proc = Start-Process -Wait -PassThru -FilePath $out -ArgumentList "/quiet /install"
-        if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
-            Write-Host "WDK installer exit code: $($proc.ExitCode) (3010=reboot pending)"
-        }
-        Write-Host "WDK installation complete"
+        Write-Host "Downloading WDK ..."
+        Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2195408" `
+          -OutFile "$env:TEMP\wdk.exe" -UseBasicParsing
+        Write-Host "Installing WDK ..."
+        Start-Process -Wait -PassThru -FilePath "$env:TEMP\wdk.exe" `
+          -ArgumentList "/quiet /install"
+        Write-Host "WDK done"
 
-    # ----------------------------------------------------------------
-    # 编译 x86 驱动
-    # ----------------------------------------------------------------
-    - name: 编译 x86 驱动
+    # ===================================================================
+    # 2. 编译 x86 驱动
+    # ===================================================================
+    - name: Build driver (x86)
       shell: cmd
       run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x86 -host_arch=x64
-        msbuild driver\fileprotect.vcxproj /p:Configuration=$(CONFIGURATION) /p:Platform=x86 /p:DebugType=none
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x86
+        msbuild driver\fileprotect.vcxproj /p:Configuration=%CONFIG% /p:Platform=x86 /p:DebugType=none
 
-    - name: 查找 x86 sys 文件
-      shell: pwsh
-      run: |
-        $files = Get-ChildItem -Recurse -Filter "FileProtectFS.sys" | Where-Object { $_.FullName -like "*x86*Release*" }
-        if ($files.Count -eq 0) {
-          Write-Host "No x86 sys found, trying all locations..."
-          Get-ChildItem -Recurse -Filter "FileProtectFS.sys" | ForEach-Object { Write-Host $_.FullName }
-        } else {
-          $files | ForEach-Object { Write-Host "Found: $($_.FullName)" }
-        }
-
-    # ----------------------------------------------------------------
-    # 编译 x64 驱动
-    # ----------------------------------------------------------------
-    - name: 编译 x64 驱动
+    # ===================================================================
+    # 3. 编译 x64 驱动
+    # ===================================================================
+    - name: Build driver (x64)
       shell: cmd
       run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
-        msbuild driver\fileprotect.vcxproj /p:Configuration=$(CONFIGURATION) /p:Platform=x64 /p:DebugType=none
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64
+        msbuild driver\fileprotect.vcxproj /p:Configuration=%CONFIG% /p:Platform=x64 /p:DebugType=none
 
-    # ----------------------------------------------------------------
-    # 上传编译产物
-    # ----------------------------------------------------------------
-    - name: 上传 x86 驱动
-      uses: actions/upload-artifact@v4
-      with:
-        name: FileProtectFS-x86
-        path: '**/FileProtectFS.sys'
-        if-no-files-found: warn
-
-    - name: 上传 x64 驱动
-      uses: actions/upload-artifact@v4
-      with:
-        name: FileProtectFS-x64
-        path: '**/FileProtectFS.sys'
-        if-no-files-found: warn
-
-    # ----------------------------------------------------------------
-    # 编译 C# 控制程序 (x86)
-    # ----------------------------------------------------------------
-    - name: 编译 C# 控制程序 x86 (单文件)
+    # ===================================================================
+    # 4. 编译 C# 控制程序 (x86 + x64 单文件)
+    # ===================================================================
+    - name: Build C# (x86 single-file)
       shell: pwsh
       run: |
         dotnet publish -c Release -r win-x86 `
@@ -97,9 +63,107 @@ jobs:
           --self-contained true `
           -o publish\x86
 
-    - name: 上传完整工具包
-      uses: actions/upload-artifact@v4
-      with:
-        name: FileProtect-Full-x86
-        path: publish\x86\FileProtect.exe
-        if-no-files-found: warn
+    - name: Build C# (x64 single-file)
+      shell: pwsh
+      run: |
+        dotnet publish -c Release -r win-x64 `
+          -p:PlatformTarget=x64 `
+          -p:PublishSingleFile=true `
+          -p:SelfContained=true `
+          -p:IncludeNativeLibrariesForSelfExtract=true `
+          -p:DebugType=embedded `
+          --self-contained true `
+          -o publish\x64
+
+    # ===================================================================
+    # 5. 收集所有文件
+    # ===================================================================
+    - name: Collect release files
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force -Path release_files
+
+        # 驱动文件
+        $sysFiles = Get-ChildItem -Recurse -Filter "FileProtectFS.sys" | Where-Object {
+          $_.DirectoryName -notmatch "obj"
+        }
+        $sysFiles | ForEach-Object {
+          $arch = if ($_.FullName -match "\\x86\\") {"x86"} else {"x64"}
+          $dest = "release_files/FileProtectFS-$arch.sys"
+          Copy-Item $_.FullName $dest -Force
+          Write-Host "Driver: $dest ($($_.Length/1KB -as [int]) KB)"
+        }
+
+        # 控制程序
+        if (Test-Path publish\x86\FileProtect.exe) {
+          Copy-Item publish\x86\FileProtect.exe release_files/FileProtect.exe
+          $size = (Get-Item publish\x86\FileProtect.exe).Length
+          Write-Host "C# x86: $( $size/1KB -as [int] ) KB"
+        }
+        if (Test-Path publish\x64\FileProtect.exe) {
+          Copy-Item publish\x64\FileProtect.exe release_files/FileProtect-x64.exe
+          $size = (Get-Item publish\x64\FileProtect.exe).Length
+          Write-Host "C# x64: $( $size/1KB -as [int] ) KB"
+        }
+
+        # INF 安装文件
+        Copy-Item driver\fileprotectfs.inf release_files/ -Force
+
+        # 清单
+        Write-Host "`n=== Release Files ==="
+        Get-ChildItem release_files | ForEach-Object {
+          Write-Host "$($_.Name)`t$($_.Length) bytes"
+        }
+
+    # ===================================================================
+    # 6. 发布到 Releases（草稿）
+    # ===================================================================
+    - name: Publish to GitHub Releases
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $tag = "v1.0-build.$env:GITHUB_RUN_NUMBER"
+
+        # Release 说明
+        $sha = "$env:GITHUB_SHA".Substring(0,7)
+        $files = Get-ChildItem release_files
+        $fileList = $files | ForEach-Object { "- $($_.Name) ($($_.Length/1KB -as [int]) KB)" } | Out-String
+
+        $notes = @"
+        FileProtectFS — 内核级文件权限保护驱动
+
+        ## 文件清单
+        — 包含文件已自动编译于 $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm')) UTC
+
+        $fileList
+        ## 使用说明
+        [完整文档](https://github.com/$env:GITHUB_REPOSITORY)
+
+        ```bat
+        :: 1. 启用测试签名（64位系统）
+        bcdedit /set testsigning on
+        重启
+
+        :: 2. 安装驱动
+        FileProtect driver install
+        FileProtect driver start
+
+        :: 3. 保护文件
+        FileProtect protect --ring0 C:\目标文件
+
+        :: 4. 查看保护状态
+        FileProtect driver status
+        ```
+        "@
+
+        # 创建 Release（草稿模式）
+        gh release create $tag `
+          --repo $env:GITHUB_REPOSITORY `
+          --title "FileProtectFS Build #$env:GITHUB_RUN_NUMBER" `
+          --notes "$notes" `
+          --draft `
+          ./release_files/*
+
+        Write-Host "✅ Release created: $tag"
+        Write-Host "   https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$tag"
