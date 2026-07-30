@@ -178,15 +178,52 @@ jobs:
     # ===================================================================
     # 7. 发布到 Releases
     # ===================================================================
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: v1.0-build.${{ github.run_number }}
-        name: FileProtectFS Build #${{ github.run_number }}
-        body: >
-          FileProtectFS — 内核级文件权限保护驱动
+    - name: Create GitHub Release (via API)
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $tag = "v1.0-build.$env:GITHUB_RUN_NUMBER"
+        $repo = $env:GITHUB_REPOSITORY  # owner/repo
 
-          自动构建于 ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        draft: true
-        generate_release_notes: false
-        files: release_files/*
+        # 1. 创建 Release
+        $body = @{
+          tag_name               = $tag
+          name                   = "FileProtectFS Build #$env:GITHUB_RUN_NUMBER"
+          body                   = "FileProtectFS — 内核级文件权限保护驱动`n自动构建于 $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm')) UTC"
+          draft                  = $true
+          generate_release_notes = $false
+        } | ConvertTo-Json
+
+        $createResult = curl.exe -s -X POST `
+          -H "Authorization: Bearer $env:GH_TOKEN" `
+          -H "Content-Type: application/json" `
+          -d $body `
+          "https://api.github.com/repos/$repo/releases"
+
+        $releaseId = ($createResult | ConvertFrom-Json).id
+        if (-not $releaseId) {
+          Write-Host "Create release failed:"
+          Write-Host $createResult
+          exit 1
+        }
+        Write-Host "Release created: id=$releaseId"
+
+        # 2. 上传文件
+        $files = Get-ChildItem -Path release_files -File
+        foreach ($file in $files) {
+          Write-Host "Uploading: $($file.Name) ..."
+          $uploadResult = curl.exe -s -X POST `
+            -H "Authorization: Bearer $env:GH_TOKEN" `
+            -H "Content-Type: application/octet-stream" `
+            --data-binary "@$($file.FullName)" `
+            "https://uploads.github.com/repos/$repo/releases/$releaseId/assets?name=$($file.Name)"
+          $uploadStatus = $uploadResult | ConvertFrom-Json
+          if ($uploadStatus.state -eq "uploaded") {
+            Write-Host "  OK"
+          } else {
+            Write-Host "  FAILED: $uploadResult"
+          }
+        }
+
+        Write-Host "Done: https://github.com/$repo/releases/tag/$tag"
