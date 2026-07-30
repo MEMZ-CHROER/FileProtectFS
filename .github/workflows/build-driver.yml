@@ -17,18 +17,37 @@ jobs:
     - uses: actions/checkout@v4
 
     # ===================================================================
-    # 1. 安装 WDK
+    # 1. 安装 WDK（用 choco，windows-2022 镜像预装 chocolatey）
     # ===================================================================
     - name: Install WDK
       shell: pwsh
       run: |
-        Write-Host "Downloading WDK ..."
-        Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2195408" `
-          -OutFile "$env:TEMP\wdk.exe" -UseBasicParsing
-        Write-Host "Installing WDK ..."
-        Start-Process -Wait -PassThru -FilePath "$env:TEMP\wdk.exe" `
-          -ArgumentList "/quiet /install"
-        Write-Host "WDK done"
+        # 先用 choco 安装 WDK，静默模式
+        choco install windowsdriverkit -y --no-progress `
+          --version 10.0.22621.382 --allow-downgrade
+        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) {
+          throw "choco install WDK failed (exit $LASTEXITCODE)"
+        }
+        Write-Host "WDK installed"
+
+        # 验证 WDK 安装位置
+        $wdkDirs = @(
+          "${env:ProgramFiles(x86)}\Windows Kits\10\build",
+          "${env:ProgramFiles}\Windows Kits\10\build"
+        )
+        $found = $false
+        foreach ($dir in $wdkDirs) {
+          if (Test-Path "$dir\WindowsDriver.default.props") {
+            Write-Host "WDK found at: $dir"
+            $found = $true
+          }
+        }
+        if (-not $found) {
+          Write-Host "WDK install path not found, trying to locate..."
+          Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits" -Recurse `
+            -Filter "WindowsDriver.default.props" -ErrorAction SilentlyContinue |
+            Select-Object -First 1 | ForEach-Object { Write-Host "Found: $($_.FullName)" }
+        }
 
     # ===================================================================
     # 2. 编译 x86 驱动
