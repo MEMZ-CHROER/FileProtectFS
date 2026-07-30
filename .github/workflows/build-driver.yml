@@ -178,54 +178,15 @@ jobs:
     # ===================================================================
     # 7. 发布到 Releases
     # ===================================================================
-    - name: Publish to GitHub Releases
-      shell: pwsh
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: |
-        $tag = "v1.0-build.$env:GITHUB_RUN_NUMBER"
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v1.0-build.${{ github.run_number }}
+        name: FileProtectFS Build #${{ github.run_number }}
+        body: >
+          FileProtectFS — 内核级文件权限保护驱动
 
-        # 检查文件是否存在
-        $files = Get-ChildItem -Path release_files -File
-        Write-Host "Files to upload:"
-        $files | ForEach-Object { Write-Host "  $($_.FullName) ($($_.Length) bytes)" }
-
-        if ($files.Count -eq 0) {
-          Write-Host "::warning::No files to upload, skipping release"
-          exit 0
-        }
-
-        $fileList = $files | ForEach-Object { "- $($_.Name) ($($_.Length/1KB -as [int]) KB)" } | Out-String
-
-        $notes = @"
-        FileProtectFS — 内核级文件权限保护驱动
-
-        自动构建于 $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm')) UTC
-
-        ## 文件清单
-        $fileList
-        ## 使用说明
-        [完整文档](https://github.com/$env:GITHUB_REPOSITORY)
-        "@
-
-        # 用 Get-Item 传递文件列表，避免通配符问题
-        gh release create $tag `
-          --repo $env:GITHUB_REPOSITORY `
-          --title "FileProtectFS Build #$env:GITHUB_RUN_NUMBER" `
-          --notes "$notes" `
-          --draft `
-          ($files | ForEach-Object { $_.FullName })
-
-        if ($LASTEXITCODE -ne 0) {
-          Write-Host "::error::gh release create failed"
-          # 尝试第二次
-          Start-Sleep 5
-          gh release create $tag `
-            --repo $env:GITHUB_REPOSITORY `
-            --title "FileProtectFS Build #$env:GITHUB_RUN_NUMBER" `
-            --notes "$notes" `
-            --draft `
-            ($files | ForEach-Object { $_.FullName })
-        }
-
-        Write-Host "✅ Release: https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$tag"
+          自动构建于 ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        draft: true
+        generate_release_notes: false
+        files: release_files/*
