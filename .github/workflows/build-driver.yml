@@ -179,13 +179,22 @@ jobs:
     # 7. 发布到 Releases
     # ===================================================================
     - name: Publish to GitHub Releases
-      if: success()  # C# 编译成功就发布，即使驱动编译失败
       shell: pwsh
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
         $tag = "v1.0-build.$env:GITHUB_RUN_NUMBER"
-        $files = Get-ChildItem release_files
+
+        # 检查文件是否存在
+        $files = Get-ChildItem -Path release_files -File
+        Write-Host "Files to upload:"
+        $files | ForEach-Object { Write-Host "  $($_.FullName) ($($_.Length) bytes)" }
+
+        if ($files.Count -eq 0) {
+          Write-Host "::warning::No files to upload, skipping release"
+          exit 0
+        }
+
         $fileList = $files | ForEach-Object { "- $($_.Name) ($($_.Length/1KB -as [int]) KB)" } | Out-String
 
         $notes = @"
@@ -199,12 +208,24 @@ jobs:
         [完整文档](https://github.com/$env:GITHUB_REPOSITORY)
         "@
 
+        # 用 Get-Item 传递文件列表，避免通配符问题
         gh release create $tag `
           --repo $env:GITHUB_REPOSITORY `
           --title "FileProtectFS Build #$env:GITHUB_RUN_NUMBER" `
           --notes "$notes" `
           --draft `
-          ./release_files/*
+          ($files | ForEach-Object { $_.FullName })
 
-        Write-Host "✅ Release: $tag"
-        Write-Host "   https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$tag"
+        if ($LASTEXITCODE -ne 0) {
+          Write-Host "::error::gh release create failed"
+          # 尝试第二次
+          Start-Sleep 5
+          gh release create $tag `
+            --repo $env:GITHUB_REPOSITORY `
+            --title "FileProtectFS Build #$env:GITHUB_RUN_NUMBER" `
+            --notes "$notes" `
+            --draft `
+            ($files | ForEach-Object { $_.FullName })
+        }
+
+        Write-Host "✅ Release: https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$tag"
