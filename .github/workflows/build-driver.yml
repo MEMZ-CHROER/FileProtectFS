@@ -185,67 +185,47 @@ jobs:
     # ===================================================================
     # 7. 发布到 Releases
     # ===================================================================
-    - name: Create GitHub Release (PowerShell API)
+    - name: Create GitHub Release (gh CLI)
       shell: pwsh
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
+        # 配置 git（gh release 需要）
+        git config user.name "github-actions"
+        git config user.email "github-actions@github.com"
+
         $tag = "v1.0-build.$env:GITHUB_RUN_NUMBER"
-        $repo = $env:GITHUB_REPOSITORY
-        $headers = @{ Authorization = "Bearer $env:GH_TOKEN" }
-        $api = "https://api.github.com/repos/$repo"
+
+        # 清理可能残留的 tag
+        Write-Host "Cleanup old tag if exists..."
+        gh release delete $tag --cleanup-tag --yes 2>$null
+
+        # 列出要上传的文件
+        $files = Get-ChildItem -Path release_files -File
+        Write-Host "Files to upload:"
+        $files | ForEach-Object { Write-Host "  $($_.Name)" }
 
         Write-Host "Creating release $tag ..."
+        gh release create $tag `
+          --title "FileProtectFS Build #$env:GITHUB_RUN_NUMBER" `
+          --notes "FileProtectFS - kernel-level file ACL protection driver`nAuto-built at $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm')) UTC" `
+          --draft `
+          --latest
 
-        # 1. 创建 Release
-        $releaseBody = @{
-          tag_name = $tag
-          name = "FileProtectFS Build #$env:GITHUB_RUN_NUMBER"
-          body = "FileProtectFS - kernel-level file ACL protection driver`nBuilt at $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm')) UTC"
-          draft = $true
+        $ec = $LASTEXITCODE
+        if ($ec -ne 0) {
+          Write-Host "::error::gh release create failed with exit code $ec"
+          # 重试一次
+          Start-Sleep 5
+          $tag2 = "v1.0-build.$env:GITHUB_RUN_NUMBER.v2"
+          gh release create $tag2 `
+            --title "FileProtectFS Build #$env:GITHUB_RUN_NUMBER" `
+            --notes "Auto-built" `
+            --draft
+          $tag = $tag2
         }
 
-        try {
-          $release = Invoke-RestMethod -Uri "$api/releases" -Method Post `
-            -Headers $headers -Body ($releaseBody | ConvertTo-Json) `
-            -ContentType "application/json"
-        } catch {
-          $err = $_.Exception.Response
-          $reader = New-Object System.IO.StreamReader($err.GetResponseStream())
-          $respBody = $reader.ReadToEnd() | Out-String
-          Write-Host "FAILED to create release: $respBody"
-          # 可能 tag 已存在，尝试获取已有 release
-          Write-Host "Trying to find existing release..."
-          try {
-            $existing = Invoke-RestMethod -Uri "$api/releases/tags/$tag" -Headers $headers
-            $release = $existing
-            Write-Host "Found existing release id=$($release.id)"
-          } catch {
-            Write-Host "No existing release found, creating with unique tag..."
-            $tag = "v1.0-build.$env:GITHUB_RUN_NUMBER.$([DateTime]::UtcNow.ToString('HHmmss'))"
-            $releaseBody.tag_name = $tag
-            $release = Invoke-RestMethod -Uri "$api/releases" -Method Post `
-              -Headers $headers -Body ($releaseBody | ConvertTo-Json) `
-              -ContentType "application/json"
-          }
-        }
+        Write-Host "Uploading files..."
+        gh release upload $tag ./release_files/* --clobber
 
-        $releaseId = $release.id
-        Write-Host "Release id=$releaseId tag=$($release.tag_name)"
-
-        # 2. 上传文件
-        $files = Get-ChildItem -Path release_files -File
-        foreach ($file in $files) {
-          Write-Host "Uploading $($file.Name) ..."
-          $uploadUri = "https://uploads.github.com/repos/$repo/releases/$releaseId/assets?name=$($file.Name)"
-          try {
-            $upload = Invoke-RestMethod -Uri $uploadUri -Method Post `
-              -Headers $headers -ContentType "application/octet-stream" `
-              -InFile $file.FullName
-            Write-Host "  OK"
-          } catch {
-            Write-Host "  FAILED: $($_.Exception.Message)"
-          }
-        }
-
-        Write-Host "Done: https://github.com/$repo/releases/tag/$tag"
+        Write-Host "Done: https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$tag"
