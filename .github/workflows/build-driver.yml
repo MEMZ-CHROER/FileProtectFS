@@ -1,5 +1,5 @@
 # FileProtectFS — GitHub Actions 自动编译内核驱动
-# push 后自动编译 x86/x64 并上传 artifact
+# push 后自动编译 x86/x64，产出 .sys 文件 + C# 控制程序
 name: Build FileProtectFS Driver
 
 on:
@@ -7,57 +7,85 @@ on:
     branches: [ master, main ]
   pull_request:
     branches: [ master, main ]
-  workflow_dispatch:        # 支持手动触发
+  workflow_dispatch:          # 支持在 GitHub 网页手动触发
+
+env:
+  CONFIGURATION: Release
 
 jobs:
-  build-driver:
-    runs-on: windows-2022   # 预装 VS 2022 + WDK
+  build:
+    runs-on: windows-2022     # 预装 VS 2022 + Windows SDK
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: 安装 WDK
+    # ----------------------------------------------------------------
+    # 安装 WDK（Windows Driver Kit）
+    # ----------------------------------------------------------------
+    - name: 安装 WDK 10.0.22621
       shell: pwsh
       run: |
-        # Windows Server 2022 镜像包含 VS 2022，需安装 WDK
-        Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2272238" -OutFile "$env:TEMP\wdk.exe"
-        Start-Process -Wait -FilePath "$env:TEMP\wdk.exe" -ArgumentList "/quiet /install"
-        echo "WDK installed"
-      continue-on-error: true
+        Write-Host "Downloading WDK installer ..."
+        $url = "https://go.microsoft.com/fwlink/?linkid=2195408"  # WDK 10.0.22621
+        $out = "$env:TEMP\wdk.exe"
+        Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
+        Write-Host "Installing WDK (silent) ..."
+        $proc = Start-Process -Wait -PassThru -FilePath $out -ArgumentList "/quiet /install"
+        if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
+            Write-Host "WDK installer exit code: $($proc.ExitCode) (3010=reboot pending)"
+        }
+        Write-Host "WDK installation complete"
 
-    - name: 还原 NuGet 包
-      run: |
-        msbuild driver\fileprotect.vcxproj /t:restore /p:configuration=Release /p:platform=x86
-
+    # ----------------------------------------------------------------
+    # 编译 x86 驱动
+    # ----------------------------------------------------------------
     - name: 编译 x86 驱动
+      shell: cmd
       run: |
-        msbuild driver\fileprotect.vcxproj /p:configuration=Release /p:platform=x86 /p:DebugType=none
-      continue-on-error: false
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x86 -host_arch=x64
+        msbuild driver\fileprotect.vcxproj /p:Configuration=$(CONFIGURATION) /p:Platform=x86 /p:DebugType=none
 
+    - name: 查找 x86 sys 文件
+      shell: pwsh
+      run: |
+        $files = Get-ChildItem -Recurse -Filter "FileProtectFS.sys" | Where-Object { $_.FullName -like "*x86*Release*" }
+        if ($files.Count -eq 0) {
+          Write-Host "No x86 sys found, trying all locations..."
+          Get-ChildItem -Recurse -Filter "FileProtectFS.sys" | ForEach-Object { Write-Host $_.FullName }
+        } else {
+          $files | ForEach-Object { Write-Host "Found: $($_.FullName)" }
+        }
+
+    # ----------------------------------------------------------------
+    # 编译 x64 驱动
+    # ----------------------------------------------------------------
     - name: 编译 x64 驱动
+      shell: cmd
       run: |
-        msbuild driver\fileprotect.vcxproj /p:configuration=Release /p:platform=x64 /p:DebugType=none
-      continue-on-error: false
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+        msbuild driver\fileprotect.vcxproj /p:Configuration=$(CONFIGURATION) /p:Platform=x64 /p:DebugType=none
 
-    - name: 上传 x86 驱动 (artifact)
+    # ----------------------------------------------------------------
+    # 上传编译产物
+    # ----------------------------------------------------------------
+    - name: 上传 x86 驱动
       uses: actions/upload-artifact@v4
       with:
         name: FileProtectFS-x86
-        path: |
-          driver\**\Release\FileProtectFS.sys
-          driver\**\x86\Release\FileProtectFS.sys
+        path: '**/FileProtectFS.sys'
         if-no-files-found: warn
 
-    - name: 上传 x64 驱动 (artifact)
+    - name: 上传 x64 驱动
       uses: actions/upload-artifact@v4
       with:
         name: FileProtectFS-x64
-        path: |
-          driver\**\Release\FileProtectFS.sys
-          driver\**\x64\Release\FileProtectFS.sys
+        path: '**/FileProtectFS.sys'
         if-no-files-found: warn
 
-    - name: 编译 C# 控制程序 (x86 单文件)
+    # ----------------------------------------------------------------
+    # 编译 C# 控制程序 (x86)
+    # ----------------------------------------------------------------
+    - name: 编译 C# 控制程序 x86 (单文件)
       shell: pwsh
       run: |
         dotnet publish -c Release -r win-x86 `
@@ -73,6 +101,5 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: FileProtect-Full-x86
-        path: |
-          publish\x86\FileProtect.exe
+        path: publish\x86\FileProtect.exe
         if-no-files-found: warn
